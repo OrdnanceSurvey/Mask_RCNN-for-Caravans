@@ -34,7 +34,14 @@ import datetime
 import numpy as np
 import skimage.draw
 import glob
-import imgaug.augmenters as iaa
+
+# Try to import augmentation library (optional)
+try:
+    import imgaug.augmenters as iaa
+    HAS_IMGAUG = True
+except ImportError:
+    HAS_IMGAUG = False
+    print("Note: imgaug not available. Training will proceed without augmentation.")
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -273,18 +280,23 @@ def train(model):
 
     # Data augmentation pipeline for aerial imagery
     # This helps when training with small datasets (e.g., 50-100 images)
-    augmentation = iaa.Sequential([
-        # Horizontal and vertical flips (caravans can face any direction)
-        iaa.Fliplr(0.5),
-        iaa.Flipud(0.5),
-        # Random 90-degree rotations (aerial view has no fixed orientation)
-        iaa.Sometimes(0.5, iaa.Rot90([1, 2, 3])),
-        # Small rotations for more variety
-        iaa.Sometimes(0.3, iaa.Affine(rotate=(-15, 15))),
-        # Brightness and contrast adjustments (different lighting conditions)
-        iaa.Sometimes(0.3, iaa.Multiply((0.8, 1.2))),
-        iaa.Sometimes(0.3, iaa.LinearContrast((0.8, 1.2))),
-    ])
+    augmentation = None
+    if HAS_IMGAUG:
+        augmentation = iaa.Sequential([
+            # Horizontal and vertical flips (caravans can face any direction)
+            iaa.Fliplr(0.5),
+            iaa.Flipud(0.5),
+            # Random 90-degree rotations (aerial view has no fixed orientation)
+            iaa.Sometimes(0.5, iaa.Rot90([1, 2, 3])),
+            # Small rotations for more variety
+            iaa.Sometimes(0.3, iaa.Affine(rotate=(-15, 15))),
+            # Brightness and contrast adjustments (different lighting conditions)
+            iaa.Sometimes(0.3, iaa.Multiply((0.8, 1.2))),
+            iaa.Sometimes(0.3, iaa.LinearContrast((0.8, 1.2))),
+        ])
+        print("Using imgaug for data augmentation")
+    else:
+        print("Training without augmentation (imgaug not installed)")
 
     # Training - Stage 1: Train heads only
     print("Training network heads")
