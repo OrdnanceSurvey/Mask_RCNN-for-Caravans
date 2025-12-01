@@ -34,6 +34,7 @@ import datetime
 import numpy as np
 import skimage.draw
 import glob
+import imgaug.augmenters as iaa
 
 # Root directory of the project
 ROOT_DIR = os.path.abspath("../../")
@@ -270,34 +271,36 @@ def train(model):
     dataset_val.load_topo(args.dataset, "val")
     dataset_val.prepare()
 
-    # # Training - Stage 1
-    # # Adjust epochs and layers as needed
-    # print("Training network heads")
-    # model.train(dataset_train, dataset_val,
-    #             learning_rate=config.LEARNING_RATE,
-    #             epochs=10,
-    #             layers='heads')
+    # Data augmentation pipeline for aerial imagery
+    # This helps when training with small datasets (e.g., 50-100 images)
+    augmentation = iaa.Sequential([
+        # Horizontal and vertical flips (caravans can face any direction)
+        iaa.Fliplr(0.5),
+        iaa.Flipud(0.5),
+        # Random 90-degree rotations (aerial view has no fixed orientation)
+        iaa.Sometimes(0.5, iaa.Rot90([1, 2, 3])),
+        # Small rotations for more variety
+        iaa.Sometimes(0.3, iaa.Affine(rotate=(-15, 15))),
+        # Brightness and contrast adjustments (different lighting conditions)
+        iaa.Sometimes(0.3, iaa.Multiply((0.8, 1.2))),
+        iaa.Sometimes(0.3, iaa.LinearContrast((0.8, 1.2))),
+    ])
 
-    # # Training - Stage 2
-    # # Finetune layers from ResNet stage 4 and up
-    # print("Training Resnet layer 3+")
-    # model.train(dataset_train, dataset_val,
-    #             learning_rate=config.LEARNING_RATE/10,
-    #             epochs=20,
-    #             layers='3+')
-        
-    # Finetune layers from ResNet stage 3 and up
-    # print("Training all")
-    # model.train(dataset_train, dataset_val,
-    #             learning_rate=config.LEARNING_RATE / 100,
-    #             epochs=100,
-    #             layers='all')
-
+    # Training - Stage 1: Train heads only
     print("Training network heads")
     model.train(dataset_train, dataset_val,
                 learning_rate=config.LEARNING_RATE,
+                epochs=30,
+                layers='heads',
+                augmentation=augmentation)
+
+    # Training - Stage 2: Fine-tune all layers
+    print("Fine-tuning all layers")
+    model.train(dataset_train, dataset_val,
+                learning_rate=config.LEARNING_RATE / 10,
                 epochs=50,
-                layers='heads')    
+                layers='all',
+                augmentation=augmentation)    
 
 
 
