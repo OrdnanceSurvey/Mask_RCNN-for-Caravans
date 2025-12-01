@@ -13,10 +13,11 @@ This will:
 
 import requests
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 import io
 import os
 import json
+import math
 
 def main():
     print("=" * 60)
@@ -120,21 +121,87 @@ def main():
     top = (768 - 512) // 2
     final_image = stitched.crop((left, top, left + 512, top + 512))
 
-    # Step 3: Save output
-    print("\n[3/3] Saving output...")
+    # Step 3: Draw polygon and save output
+    print("\n[3/3] Drawing polygon and saving output...")
 
     os.makedirs("data/test_output", exist_ok=True)
 
-    # Save image
-    image_path = f"data/test_output/caravan_{caravan['id']}.png"
+    # Calculate the bounding box of the downloaded image in lat/lon
+    # Each tile at zoom 19 covers a certain area
+    def tile_to_latlon(tile_x, tile_y, zoom):
+        """Convert tile coordinates to lat/lon (top-left corner of tile)"""
+        n = 2 ** zoom
+        lon = tile_x / n * 360.0 - 180.0
+        lat = math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * tile_y / n))))
+        return lat, lon
+
+    # Get bounds of the 3x3 tile grid we downloaded
+    top_left_lat, top_left_lon = tile_to_latlon(tile_x - 1, tile_y - 1, zoom)
+    bottom_right_lat, bottom_right_lon = tile_to_latlon(tile_x + 2, tile_y + 2, zoom)
+
+    # Adjust for the crop (we cropped from 768x768 to 512x512, removing 128px from each side)
+    # 128 pixels = 128/768 of the total span
+    crop_ratio = 128 / 768
+    lon_span = bottom_right_lon - top_left_lon
+    lat_span = top_left_lat - bottom_right_lat  # Note: lat decreases going down
+
+    img_west = top_left_lon + crop_ratio * lon_span
+    img_east = bottom_right_lon - crop_ratio * lon_span
+    img_north = top_left_lat - crop_ratio * lat_span
+    img_south = bottom_right_lat + crop_ratio * lat_span
+
+    print(f"Image bounds: N={img_north:.6f}, S={img_south:.6f}, E={img_east:.6f}, W={img_west:.6f}")
+
+    # Convert caravan polygon coords to pixel coords
+    def latlon_to_pixel(lon, lat, img_width=512, img_height=512):
+        """Convert lat/lon to pixel coordinates in the image"""
+        x = (lon - img_west) / (img_east - img_west) * img_width
+        y = (img_north - lat) / (img_north - img_south) * img_height
+        return int(x), int(y)
+
+    # Draw the polygon on the image
+    draw = ImageDraw.Draw(final_image)
+
+    pixel_coords = [latlon_to_pixel(lon, lat) for lon, lat in coords]
+    print(f"Caravan polygon ({len(pixel_coords)} points):")
+    for i, (px, py) in enumerate(pixel_coords):
+        print(f"  Point {i}: pixel ({px}, {py})")
+
+    # Draw polygon outline in RED
+    if len(pixel_coords) >= 3:
+        # Draw filled polygon with transparency would require RGBA, so just draw thick outline
+        draw.polygon(pixel_coords, outline='red', fill=None)
+        # Draw thicker outline by drawing multiple times
+        for offset in range(-2, 3):
+            shifted = [(x + offset, y) for x, y in pixel_coords]
+            draw.polygon(shifted, outline='red', fill=None)
+            shifted = [(x, y + offset) for x, y in pixel_coords]
+            draw.polygon(shifted, outline='red', fill=None)
+
+    # Save image WITH polygon
+    image_path = f"data/test_output/caravan_{caravan['id']}_with_polygon.png"
     final_image.save(image_path)
-    print(f"Saved image: {image_path}")
+    print(f"Saved image with polygon: {image_path}")
+
+    # Also save original without polygon
+    # Re-download for clean version
+    original_image = stitched.crop((left, top, left + 512, top + 512))
+    original_path = f"data/test_output/caravan_{caravan['id']}_original.png"
+    original_image.save(original_path)
+    print(f"Saved original image: {original_path}")
 
     # Save metadata
     metadata = {
         "osm_id": caravan['id'],
         "center": [center_lon, center_lat],
         "coordinates": coords,
+        "pixel_coordinates": pixel_coords,
+        "image_bounds": {
+            "north": img_north,
+            "south": img_south,
+            "east": img_east,
+            "west": img_west
+        },
         "zoom": zoom,
         "source": "ESRI World Imagery"
     }
@@ -147,7 +214,11 @@ def main():
     print("\n" + "=" * 60)
     print("SUCCESS! Check data/test_output/ folder")
     print("=" * 60)
-    print(f"\nOpen {image_path} to see the satellite image of a caravan.")
+    print(f"\nFiles created:")
+    print(f"  - {image_path} (with RED polygon)")
+    print(f"  - {original_path} (original)")
+    print(f"  - {metadata_path}")
+    print(f"\nThe RED polygon shows the caravan boundary from OpenStreetMap.")
 
     return 0
 
