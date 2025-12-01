@@ -641,6 +641,132 @@ def create_mask_from_feature(feature, image_bbox, img_width, img_height):
 # Main CLI
 # =============================================================================
 
+# UK regions known to have many static caravans
+UK_CARAVAN_REGIONS = [
+    {"name": "Anglesey", "bbox": "-4.7,53.1,-4.0,53.5"},
+    {"name": "North Wales Coast", "bbox": "-4.0,53.1,-3.3,53.4"},
+    {"name": "Cornwall", "bbox": "-5.7,49.9,-4.5,50.7"},
+    {"name": "Devon South", "bbox": "-4.2,50.2,-3.4,50.7"},
+    {"name": "Dorset", "bbox": "-2.9,50.5,-1.8,50.9"},
+    {"name": "Norfolk", "bbox": "0.5,52.5,1.8,53.0"},
+    {"name": "Suffolk Coast", "bbox": "1.2,51.9,1.8,52.5"},
+    {"name": "Essex Coast", "bbox": "0.5,51.5,1.2,51.9"},
+    {"name": "Kent Coast", "bbox": "0.8,50.9,1.4,51.4"},
+    {"name": "East Yorkshire", "bbox": "-0.5,53.6,0.2,54.2"},
+    {"name": "Lincolnshire Coast", "bbox": "-0.2,53.0,0.4,53.6"},
+    {"name": "Cumbria Coast", "bbox": "-3.6,54.0,-3.0,54.5"},
+    {"name": "Lancashire Coast", "bbox": "-3.2,53.5,-2.8,54.0"},
+    {"name": "Scottish Borders", "bbox": "-2.5,55.4,-1.8,55.9"},
+    {"name": "Pembrokeshire", "bbox": "-5.3,51.6,-4.7,52.0"},
+]
+
+
+def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=18, verbose=True):
+    """
+    Create a large dataset by fetching caravans from multiple UK regions.
+
+    Args:
+        output_dir: Directory for final training data
+        target_count: Target number of caravan images (default: 1000)
+        source: Imagery source
+        zoom: Zoom level
+        verbose: Print progress
+
+    Returns:
+        Statistics about the generated dataset
+    """
+    if verbose:
+        print("=" * 60)
+        print(f"LARGE DATASET: Targeting {target_count} caravan images")
+        print("=" * 60)
+        print(f"\nWill search {len(UK_CARAVAN_REGIONS)} UK regions for caravans")
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    all_features = []
+    total_downloaded = 0
+
+    # Step 1: Collect caravans from all regions
+    for region in UK_CARAVAN_REGIONS:
+        if total_downloaded >= target_count:
+            break
+
+        if verbose:
+            print(f"\n{'='*40}")
+            print(f"Searching: {region['name']}")
+            print(f"{'='*40}")
+
+        # Fetch OSM data for this region
+        temp_osm = output_dir / f"temp_osm_{region['name'].replace(' ', '_')}.geojson"
+        result = step1_fetch_osm_caravans(region['bbox'], temp_osm, verbose=verbose)
+
+        if result and result.get('features'):
+            features = result['features']
+            # Only take static_caravan features (individual caravans, not sites)
+            caravan_features = [f for f in features if f['properties'].get('feature_type') == 'static_caravan']
+
+            if verbose:
+                print(f"Found {len(caravan_features)} individual caravans in {region['name']}")
+
+            all_features.extend(caravan_features)
+            total_downloaded = len(all_features)
+
+            if verbose:
+                print(f"Total caravans so far: {total_downloaded}")
+
+        time.sleep(1)  # Rate limiting between regions
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print(f"Collected {len(all_features)} caravan polygons from OSM")
+        print(f"{'='*60}")
+
+    if len(all_features) == 0:
+        print("No caravans found! Check your internet connection.")
+        return None
+
+    # Limit to target count
+    if len(all_features) > target_count:
+        all_features = all_features[:target_count]
+        if verbose:
+            print(f"Limited to {target_count} caravans")
+
+    # Save combined GeoJSON
+    combined_geojson = {
+        'type': 'FeatureCollection',
+        'features': all_features
+    }
+    combined_path = output_dir / "all_caravans.geojson"
+    with open(combined_path, 'w') as f:
+        json.dump(combined_geojson, f)
+
+    if verbose:
+        print(f"Saved combined data to: {combined_path}")
+
+    # Step 2: Check coverage (quick pass)
+    coverage_path = output_dir / "coverage.geojson"
+    step2_check_coverage(combined_path, coverage_path, verbose=verbose)
+
+    # Step 3: Download imagery
+    imagery_dir = output_dir / "imagery"
+    step3_download_imagery(coverage_path, imagery_dir, source=source, zoom=zoom, verbose=verbose)
+
+    # Step 4: Generate training data
+    training_dir = output_dir / "training"
+    stats = step4_generate_training_data(imagery_dir, training_dir, verbose=verbose)
+
+    if verbose:
+        print(f"\n{'='*60}")
+        print("LARGE DATASET COMPLETE!")
+        print(f"{'='*60}")
+        print(f"\nTraining data ready in: {training_dir}")
+        print(f"\nTo train the model, run:")
+        print(f"  python samples/caravans/caravan.py train --dataset={training_dir} --weights=coco")
+
+    return stats
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Create caravan detection training dataset from OSM + aerial imagery",
@@ -655,6 +781,9 @@ Examples:
 
   # Run all steps at once:
   python create_caravan_dataset.py all --bbox "-4.7,53.2,-4.0,53.4" --output data/training/
+
+  # Create a large dataset (1000+ images) from multiple UK regions:
+  python create_caravan_dataset.py large --count 1000 --output data/large_dataset/
 
 Bounding box format: "west,south,east,north" (longitude,latitude,longitude,latitude)
 
@@ -697,6 +826,13 @@ Example areas with caravans (UK):
     p_all.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
     p_all.add_argument('--zoom', type=int, default=18, help='Zoom level')
     p_all.add_argument('--patch-size', type=int, default=224, help='Patch size in pixels')
+
+    # Large dataset from multiple UK regions
+    p_large = subparsers.add_parser('large', help='Create large dataset (1000+ images) from multiple UK regions')
+    p_large.add_argument('--count', type=int, default=1000, help='Target number of images (default: 1000)')
+    p_large.add_argument('--output', default='data/large_dataset/', help='Output directory')
+    p_large.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
+    p_large.add_argument('--zoom', type=int, default=18, help='Zoom level')
 
     args = parser.parse_args()
 
@@ -765,6 +901,15 @@ Example areas with caravans (UK):
         print(f"     python samples/caravans/caravan.py train --dataset={args.output} --weights=coco")
 
         return 0
+
+    elif args.command == 'large':
+        result = step_large_dataset(
+            args.output,
+            target_count=args.count,
+            source=args.source,
+            zoom=args.zoom
+        )
+        return 0 if result else 1
 
     return 0
 
