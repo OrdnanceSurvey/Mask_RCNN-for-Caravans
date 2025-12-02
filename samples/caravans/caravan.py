@@ -170,7 +170,7 @@ class TopoDataset(utils.Dataset):
             print("!!! no masks were found.", info)
             
         # Return mask, and array of class IDs of each instance.
-        return masks.astype(np.bool), np.array(class_ids, dtype=np.int32)
+        return masks.astype(bool), np.array(class_ids, dtype=np.int32)
 
     def image_reference(self, image_id):
         """Return the path of the image."""
