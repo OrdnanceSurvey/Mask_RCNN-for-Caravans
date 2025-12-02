@@ -2165,32 +2165,41 @@ class MaskRCNN():
         # In training mode, model outputs are:
         # [0-8]: feature outputs (rpn_class_logits, rpn_class, rpn_bbox,
         #        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, rpn_rois, output_rois)
-        # [9-13]: loss outputs (rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss)
+        # [9-13]: loss outputs (rpn_class_loss, rpn_bbox_loss, mrcnn_class_loss, mrcnn_bbox_loss, mrcnn_mask_loss)
 
-        # Create loss functions - one for each output
-        # Losses at indices 9-13 should be minimized, others return 0
         loss_weights = self.config.LOSS_WEIGHTS
 
-        def make_loss(name=None):
-            def loss_fn(y_true, y_pred):
-                weight = loss_weights.get(name, 1.0) if name else 0.0
-                return tf.reduce_mean(y_pred) * weight
-            return loss_fn
+        # Map output indices to loss names (indices 9-13 are the loss outputs)
+        loss_index_to_name = {
+            9: "rpn_class_loss",
+            10: "rpn_bbox_loss",
+            11: "mrcnn_class_loss",
+            12: "mrcnn_bbox_loss",
+            13: "mrcnn_mask_loss"
+        }
 
-        # Build loss list - 0 for non-loss outputs, weighted loss for loss outputs
-        losses = []
-        loss_output_names = ["rpn_class_loss", "rpn_bbox_loss",
-                            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
+        # Create loss functions for each output
+        losses = {}
+        num_outputs = len(self.keras_model.outputs)
 
-        for i, output in enumerate(self.keras_model.outputs):
-            output_name = output.name.split('/')[0]
-            if output_name in loss_output_names:
-                losses.append(make_loss(output_name))
+        for i in range(num_outputs):
+            output_name = self.keras_model.output_names[i] if hasattr(self.keras_model, 'output_names') else f"output_{i}"
+
+            if i in loss_index_to_name:
+                # This is a loss output - create a function that returns the weighted loss
+                loss_name = loss_index_to_name[i]
+                weight = loss_weights.get(loss_name, 1.0)
+
+                # Create a closure with the weight value captured
+                def make_loss_fn(w):
+                    def loss_fn(y_true, y_pred):
+                        return tf.reduce_mean(y_pred) * w
+                    return loss_fn
+
+                losses[output_name] = make_loss_fn(weight)
             else:
-                losses.append(make_loss())  # Returns 0
-
-        # Add L2 Regularization via regularization_losses
-        # (Keras automatically applies kernel_regularizer from layers)
+                # Non-loss output - use None to ignore it
+                losses[output_name] = None
 
         self.keras_model.compile(
             optimizer=optimizer,
