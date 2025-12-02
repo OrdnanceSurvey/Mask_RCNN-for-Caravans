@@ -2162,43 +2162,40 @@ class MaskRCNN():
             learning_rate=learning_rate, momentum=momentum,
             clipnorm=self.config.GRADIENT_CLIP_NORM)
 
-        # Loss names for the loss layers in the model
-        loss_names = [
-            "rpn_class_loss",  "rpn_bbox_loss",
-            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
+        # In training mode, model outputs are:
+        # [0-8]: feature outputs (rpn_class_logits, rpn_class, rpn_bbox,
+        #        mrcnn_class_logits, mrcnn_class, mrcnn_bbox, mrcnn_mask, rpn_rois, output_rois)
+        # [9-13]: loss outputs (rpn_class_loss, rpn_bbox_loss, class_loss, bbox_loss, mask_loss)
 
-        # Get loss layers
-        self._loss_layers = {}
-        for name in loss_names:
-            self._loss_layers[name] = self.keras_model.get_layer(name)
+        # Create loss functions - one for each output
+        # Losses at indices 9-13 should be minimized, others return 0
+        loss_weights = self.config.LOSS_WEIGHTS
 
-        # Store config for later use
-        self._loss_weights = self.config.LOSS_WEIGHTS
-        self._weight_decay = self.config.WEIGHT_DECAY
+        def make_loss(name=None):
+            def loss_fn(y_true, y_pred):
+                weight = loss_weights.get(name, 1.0) if name else 0.0
+                return tf.reduce_mean(y_pred) * weight
+            return loss_fn
 
-        # Create dummy outputs loss (returns 0, actual loss comes from model.losses)
-        def dummy_loss(y_true, y_pred):
-            return 0.0
+        # Build loss list - 0 for non-loss outputs, weighted loss for loss outputs
+        losses = []
+        loss_output_names = ["rpn_class_loss", "rpn_bbox_loss",
+                            "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
 
-        # Compile with dummy loss for each output
+        for i, output in enumerate(self.keras_model.outputs):
+            output_name = output.name.split('/')[0]
+            if output_name in loss_output_names:
+                losses.append(make_loss(output_name))
+            else:
+                losses.append(make_loss())  # Returns 0
+
+        # Add L2 Regularization via regularization_losses
+        # (Keras automatically applies kernel_regularizer from layers)
+
         self.keras_model.compile(
             optimizer=optimizer,
-            loss=[dummy_loss] * len(self.keras_model.outputs),
+            loss=losses,
             run_eagerly=True)
-
-        # Add actual losses to the model
-        for name in loss_names:
-            layer = self._loss_layers[name]
-            self.keras_model.add_loss(
-                tf.reduce_mean(layer.output) * self._loss_weights.get(name, 1.))
-
-        # Add L2 Regularization
-        reg_losses = [
-            keras.regularizers.l2(self._weight_decay)(w) / tf.cast(tf.size(w), tf.float32)
-            for w in self.keras_model.trainable_weights
-            if 'gamma' not in w.name and 'beta' not in w.name]
-        if reg_losses:
-            self.keras_model.add_loss(tf.add_n(reg_losses))
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match
