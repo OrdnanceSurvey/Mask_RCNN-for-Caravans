@@ -312,7 +312,7 @@ def step2_check_coverage(input_path, output_path, verbose=True):
 # STEP 3: Download imagery
 # =============================================================================
 
-def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbose=True):
+def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=256, verbose=True):
     """
     Download aerial imagery tiles for caravan locations.
 
@@ -320,7 +320,8 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbo
         input_path: Path to GeoJSON from step 2
         output_dir: Directory to save imagery
         source: Imagery source ('esri', 'oam', or 'bing')
-        zoom: Zoom level (higher = more detail, 18-19 recommended)
+        zoom: Zoom level (19 recommended for tight caravan crops)
+        size: Image size in pixels (256 for tight single-caravan crops)
         verbose: Print progress messages
 
     Returns:
@@ -374,7 +375,7 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbo
                 output_dir / f"caravan_{feature['properties']['osm_id']}.png",
                 source=source,
                 zoom=zoom,
-                size=512
+                size=size
             )
 
             if result and result[0]:
@@ -420,7 +421,7 @@ def tile_to_lonlat(tx, ty, zoom):
     return lon_deg, lat_deg
 
 
-def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512):
+def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=256):
     """
     Download a tile image centered on the given coordinates.
 
@@ -428,8 +429,8 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512)
         lon, lat: Center coordinates
         output_path: Path to save the image
         source: 'esri' or 'oam'
-        zoom: Zoom level
-        size: Output image size in pixels
+        zoom: Zoom level (18-19 recommended for caravans)
+        size: Output image size in pixels (256 recommended for tight crops)
 
     Returns:
         tuple: (Path to saved image, actual_bbox) where actual_bbox is [west, south, east, north]
@@ -527,14 +528,14 @@ requests.io = io
 # STEP 4: Generate training data (patches + masks)
 # =============================================================================
 
-def step4_generate_training_data(input_dir, output_dir, patch_size=224, verbose=True):
+def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose=True):
     """
     Generate training patches and masks from downloaded imagery.
 
     Args:
         input_dir: Directory with downloaded imagery and metadata.json
         output_dir: Directory for training data output
-        patch_size: Size of output patches
+        patch_size: Size of output patches (None = keep original size)
         verbose: Print progress messages
 
     Returns:
@@ -593,9 +594,13 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=224, verbose=
                 img_height
             )
 
-            # Resize to patch size
-            image_resized = image.resize((patch_size, patch_size), Image.LANCZOS)
-            mask_resized = mask.resize((patch_size, patch_size), Image.NEAREST)
+            # Resize to patch size if specified, otherwise keep original
+            if patch_size:
+                image_resized = image.resize((patch_size, patch_size), Image.LANCZOS)
+                mask_resized = mask.resize((patch_size, patch_size), Image.NEAREST)
+            else:
+                image_resized = image
+                mask_resized = mask
 
             # Split train/val (80/20)
             osm_id = item['feature']['properties']['osm_id']
@@ -796,7 +801,7 @@ UK_CARAVAN_REGIONS = [
 ]
 
 
-def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=18, verbose=True):
+def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, size=256, verbose=True):
     """
     Create a large dataset by fetching caravans from multiple UK regions.
 
@@ -804,7 +809,8 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=18, ve
         output_dir: Directory for final training data
         target_count: Target number of caravan images (default: 1000)
         source: Imagery source
-        zoom: Zoom level
+        zoom: Zoom level (19 recommended for tight crops)
+        size: Image size in pixels (256 for single-caravan crops)
         verbose: Print progress
 
     Returns:
@@ -883,9 +889,9 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=18, ve
     coverage_path = output_dir / "coverage.geojson"
     step2_check_coverage(combined_path, coverage_path, verbose=verbose)
 
-    # Step 3: Download imagery
+    # Step 3: Download imagery (tight crops around each caravan)
     imagery_dir = output_dir / "imagery"
-    step3_download_imagery(coverage_path, imagery_dir, source=source, zoom=zoom, verbose=verbose)
+    step3_download_imagery(coverage_path, imagery_dir, source=source, zoom=zoom, size=size, verbose=verbose)
 
     # Step 4: Generate training data
     training_dir = output_dir / "training"
@@ -946,7 +952,8 @@ Example areas with caravans (UK):
     p3.add_argument('--input', required=True, help='Input GeoJSON from step 2')
     p3.add_argument('--output', default='data/imagery/', help='Output directory')
     p3.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
-    p3.add_argument('--zoom', type=int, default=18, help='Zoom level (18-19 recommended)')
+    p3.add_argument('--zoom', type=int, default=19, help='Zoom level (19 recommended for tight crops)')
+    p3.add_argument('--size', type=int, default=256, help='Image size in pixels (256 for single-caravan crops)')
 
     # Step 4: Generate
     p4 = subparsers.add_parser('step4_generate', help='Generate training patches and masks')
@@ -967,7 +974,8 @@ Example areas with caravans (UK):
     p_large.add_argument('--count', type=int, default=1000, help='Target number of images (default: 1000)')
     p_large.add_argument('--output', default='data/large_dataset/', help='Output directory')
     p_large.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
-    p_large.add_argument('--zoom', type=int, default=18, help='Zoom level')
+    p_large.add_argument('--zoom', type=int, default=19, help='Zoom level (19 for tight crops)')
+    p_large.add_argument('--size', type=int, default=256, help='Image size (256 for single-caravan crops)')
 
     # Verify mask alignment
     p_verify = subparsers.add_parser('verify', help='Verify mask alignment on training data')
@@ -990,7 +998,7 @@ Example areas with caravans (UK):
         return 0 if result else 1
 
     elif args.command == 'step3_download':
-        result = step3_download_imagery(args.input, args.output, args.source, args.zoom)
+        result = step3_download_imagery(args.input, args.output, args.source, args.zoom, args.size)
         return 0 if result else 1
 
     elif args.command == 'step4_generate':
@@ -1048,7 +1056,8 @@ Example areas with caravans (UK):
             args.output,
             target_count=args.count,
             source=args.source,
-            zoom=args.zoom
+            zoom=args.zoom,
+            size=args.size
         )
         return 0 if result else 1
 
