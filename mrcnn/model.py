@@ -2159,23 +2159,19 @@ class MaskRCNN():
         """
         # Optimizer object
         optimizer = keras.optimizers.SGD(
-            lr=learning_rate, momentum=momentum,
+            learning_rate=learning_rate, momentum=momentum,
             clipnorm=self.config.GRADIENT_CLIP_NORM)
-        # Add Losses
-        # First, clear previously set losses to avoid duplication
-        self.keras_model._losses = []
-        self.keras_model._per_input_losses = {}
+
+        # Collect losses from named loss layers
         loss_names = [
             "rpn_class_loss",  "rpn_bbox_loss",
             "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
+
+        # Build the total loss
+        loss_layers = []
         for name in loss_names:
             layer = self.keras_model.get_layer(name)
-            if layer.output in self.keras_model.losses:
-                continue
-            loss = (
-                tf.reduce_mean(layer.output, keepdims=True)
-                * self.config.LOSS_WEIGHTS.get(name, 1.))
-            self.keras_model.add_loss(loss)
+            loss_layers.append(layer)
 
         # Add L2 Regularization
         # Skip gamma and beta weights of batch normalization layers.
@@ -2183,23 +2179,21 @@ class MaskRCNN():
             keras.regularizers.l2(self.config.WEIGHT_DECAY)(w) / tf.cast(tf.size(w), tf.float32)
             for w in self.keras_model.trainable_weights
             if 'gamma' not in w.name and 'beta' not in w.name]
-        self.keras_model.add_loss(tf.add_n(reg_losses))
 
-        # Compile
+        # Create a custom loss function that combines all losses
+        def total_loss(y_true, y_pred):
+            loss = tf.constant(0.0)
+            for name, layer in zip(loss_names, loss_layers):
+                layer_loss = tf.reduce_mean(layer.output) * self.config.LOSS_WEIGHTS.get(name, 1.)
+                loss = loss + layer_loss
+            # Add regularization
+            loss = loss + tf.add_n(reg_losses)
+            return loss
+
+        # Compile with custom loss
         self.keras_model.compile(
             optimizer=optimizer,
-            loss=[None] * len(self.keras_model.outputs))
-
-        # Add metrics for losses
-        for name in loss_names:
-            if name in self.keras_model.metrics_names:
-                continue
-            layer = self.keras_model.get_layer(name)
-            self.keras_model.metrics_names.append(name)
-            loss = (
-                tf.reduce_mean(layer.output, keepdims=True)
-                * self.config.LOSS_WEIGHTS.get(name, 1.))
-            self.keras_model.metrics_tensors.append(loss)
+            loss=[total_loss] + [None] * (len(self.keras_model.outputs) - 1))
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match
