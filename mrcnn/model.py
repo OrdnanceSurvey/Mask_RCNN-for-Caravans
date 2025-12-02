@@ -2169,41 +2169,27 @@ class MaskRCNN():
 
         loss_weights = self.config.LOSS_WEIGHTS
 
-        # Map output indices to loss names (indices 9-13 are the loss outputs)
-        loss_index_to_name = {
-            9: "rpn_class_loss",
-            10: "rpn_bbox_loss",
-            11: "mrcnn_class_loss",
-            12: "mrcnn_bbox_loss",
-            13: "mrcnn_mask_loss"
-        }
+        # The loss outputs are at indices 9-13
+        # Add each loss to the model using add_loss()
+        loss_names = ["rpn_class_loss", "rpn_bbox_loss",
+                      "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
 
-        # Create loss functions for each output
-        losses = {}
-        num_outputs = len(self.keras_model.outputs)
+        # Clear any existing losses first
+        self.keras_model._losses = []
 
-        for i in range(num_outputs):
-            output_name = self.keras_model.output_names[i] if hasattr(self.keras_model, 'output_names') else f"output_{i}"
+        for i, loss_name in enumerate(loss_names):
+            # Get the loss output tensor (indices 9-13)
+            loss_tensor = self.keras_model.outputs[9 + i]
+            weight = loss_weights.get(loss_name, 1.0)
+            # Add weighted loss - use tf.reduce_mean to ensure scalar
+            weighted_loss = tf.reduce_mean(loss_tensor) * weight
+            self.keras_model.add_loss(weighted_loss)
 
-            if i in loss_index_to_name:
-                # This is a loss output - create a function that returns the weighted loss
-                loss_name = loss_index_to_name[i]
-                weight = loss_weights.get(loss_name, 1.0)
-
-                # Create a closure with the weight value captured
-                def make_loss_fn(w):
-                    def loss_fn(y_true, y_pred):
-                        return tf.reduce_mean(y_pred) * w
-                    return loss_fn
-
-                losses[output_name] = make_loss_fn(weight)
-            else:
-                # Non-loss output - use None to ignore it
-                losses[output_name] = None
-
+        # Compile with a dummy loss that returns 0 for all outputs
+        # The actual losses are added via add_loss() above
         self.keras_model.compile(
             optimizer=optimizer,
-            loss=losses,
+            loss=lambda y_true, y_pred: tf.constant(0.0),
             run_eagerly=True)
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
