@@ -369,7 +369,7 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbo
 
         # Download imagery
         try:
-            img_path = download_tile_image(
+            result = download_tile_image(
                 center_lon, center_lat,
                 output_dir / f"caravan_{feature['properties']['osm_id']}.png",
                 source=source,
@@ -377,12 +377,14 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbo
                 size=512
             )
 
-            if img_path:
+            if result and result[0]:
+                img_path, actual_bbox = result
                 downloaded.append({
                     'image_path': str(img_path),
                     'feature': feature,
                     'center': [center_lon, center_lat],
-                    'bbox': feat_bbox,
+                    'bbox': actual_bbox,  # Use the ACTUAL image bbox, not feature bbox
+                    'feature_bbox': feat_bbox,  # Keep feature bbox for reference
                     'zoom': zoom,
                     'source': source
                 })
@@ -409,6 +411,15 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=18, verbo
     return downloaded
 
 
+def tile_to_lonlat(tx, ty, zoom):
+    """Convert tile coordinates to lon/lat (top-left corner of tile)."""
+    n = 2 ** zoom
+    lon_deg = tx / n * 360.0 - 180.0
+    lat_rad = np.arctan(np.sinh(np.pi * (1 - 2 * ty / n)))
+    lat_deg = np.degrees(lat_rad)
+    return lon_deg, lat_deg
+
+
 def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512):
     """
     Download a tile image centered on the given coordinates.
@@ -421,7 +432,8 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512)
         size: Output image size in pixels
 
     Returns:
-        Path to saved image or None if failed
+        tuple: (Path to saved image, actual_bbox) where actual_bbox is [west, south, east, north]
+               Returns (None, None) if failed
     """
     # Convert lat/lon to tile coordinates
     n = 2 ** zoom
@@ -440,6 +452,12 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512)
     # Download center tile and surrounding tiles
     tiles = []
     half = tiles_needed // 2
+
+    # Track the actual tile range
+    min_tx = tile_x - half
+    max_tx = tile_x + half
+    min_ty = tile_y - half
+    max_ty = tile_y + half
 
     for dy in range(-half, half + 1):
         row = []
@@ -471,11 +489,33 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=512)
     top = (total_height - size) // 2
     cropped = stitched.crop((left, top, left + size, top + size))
 
+    # Calculate the ACTUAL bounding box of the cropped image
+    # First, get the bbox of the full stitched image (in lon/lat)
+    stitch_west, stitch_north = tile_to_lonlat(min_tx, min_ty, zoom)
+    stitch_east, stitch_south = tile_to_lonlat(max_tx + 1, max_ty + 1, zoom)
+
+    # Calculate the crop offset as a fraction of the stitched image
+    crop_left_frac = left / total_width
+    crop_top_frac = top / total_height
+    crop_right_frac = (left + size) / total_width
+    crop_bottom_frac = (top + size) / total_height
+
+    # Apply the crop to get the actual image bbox
+    stitch_lon_range = stitch_east - stitch_west
+    stitch_lat_range = stitch_north - stitch_south  # Note: north > south
+
+    actual_west = stitch_west + crop_left_frac * stitch_lon_range
+    actual_east = stitch_west + crop_right_frac * stitch_lon_range
+    actual_north = stitch_north - crop_top_frac * stitch_lat_range
+    actual_south = stitch_north - crop_bottom_frac * stitch_lat_range
+
+    actual_bbox = [actual_west, actual_south, actual_east, actual_north]
+
     # Save
     output_path = Path(output_path)
     cropped.save(output_path)
 
-    return output_path
+    return output_path, actual_bbox
 
 
 # Need to add this import for BytesIO
@@ -635,6 +675,101 @@ def create_mask_from_feature(feature, image_bbox, img_width, img_height):
         draw.polygon(pixel_coords, fill=255)
 
     return mask
+
+
+# =============================================================================
+# Verification / Debug utilities
+# =============================================================================
+
+def verify_mask_alignment(training_dir, num_samples=10, output_path=None):
+    """
+    Verify that masks are properly aligned with images.
+    Creates overlay visualizations to check alignment.
+
+    Args:
+        training_dir: Path to training data directory
+        num_samples: Number of samples to visualize
+        output_path: Optional path to save the visualization
+
+    Returns:
+        None (displays or saves visualization)
+    """
+    import matplotlib.pyplot as plt
+
+    training_dir = Path(training_dir)
+    train_images = training_dir / "train" / "images"
+    train_labels = training_dir / "train" / "labels" / "1"
+
+    # Get image files
+    image_files = list(train_images.glob("*.tif")) + list(train_images.glob("*.png"))
+
+    if not image_files:
+        print(f"No images found in {train_images}")
+        return
+
+    # Sample random images
+    import random
+    samples = random.sample(image_files, min(num_samples, len(image_files)))
+
+    # Create visualization
+    cols = min(5, len(samples))
+    rows = (len(samples) + cols - 1) // cols
+    fig, axes = plt.subplots(rows, cols, figsize=(4 * cols, 4 * rows))
+
+    if len(samples) == 1:
+        axes = [[axes]]
+    elif rows == 1:
+        axes = [axes]
+
+    for idx, img_path in enumerate(samples):
+        row, col = idx // cols, idx % cols
+        ax = axes[row][col] if rows > 1 else axes[col]
+
+        # Load image
+        img = Image.open(img_path).convert('RGB')
+
+        # Find corresponding mask
+        mask_name = img_path.stem + ".png"
+        mask_path = train_labels / mask_name
+
+        if mask_path.exists():
+            mask = Image.open(mask_path).convert('L')
+
+            # Create overlay: red where mask is white
+            img_array = np.array(img)
+            mask_array = np.array(mask)
+
+            # Create red overlay
+            overlay = img_array.copy()
+            mask_bool = mask_array > 0
+            overlay[mask_bool, 0] = np.minimum(255, overlay[mask_bool, 0] + 100)  # Add red
+            overlay[mask_bool, 1] = overlay[mask_bool, 1] // 2  # Reduce green
+            overlay[mask_bool, 2] = overlay[mask_bool, 2] // 2  # Reduce blue
+
+            ax.imshow(overlay)
+            ax.set_title(f"{img_path.stem}\nmask pixels: {mask_bool.sum()}")
+        else:
+            ax.imshow(img)
+            ax.set_title(f"{img_path.stem}\nNO MASK FOUND")
+
+        ax.axis('off')
+
+    # Hide empty subplots
+    for idx in range(len(samples), rows * cols):
+        row, col = idx // cols, idx % cols
+        ax = axes[row][col] if rows > 1 else axes[col]
+        ax.axis('off')
+
+    plt.suptitle("Mask Alignment Check (red = mask overlay)", fontsize=14)
+    plt.tight_layout()
+
+    if output_path:
+        plt.savefig(output_path, dpi=150, bbox_inches='tight')
+        print(f"Saved visualization to: {output_path}")
+    else:
+        plt.show()
+
+    plt.close()
 
 
 # =============================================================================
@@ -834,6 +969,12 @@ Example areas with caravans (UK):
     p_large.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
     p_large.add_argument('--zoom', type=int, default=18, help='Zoom level')
 
+    # Verify mask alignment
+    p_verify = subparsers.add_parser('verify', help='Verify mask alignment on training data')
+    p_verify.add_argument('--input', required=True, help='Training data directory')
+    p_verify.add_argument('--samples', type=int, default=10, help='Number of samples to check')
+    p_verify.add_argument('--output', help='Optional output image path (displays if not set)')
+
     args = parser.parse_args()
 
     if not args.command:
@@ -910,6 +1051,10 @@ Example areas with caravans (UK):
             zoom=args.zoom
         )
         return 0 if result else 1
+
+    elif args.command == 'verify':
+        verify_mask_alignment(args.input, args.samples, args.output)
+        return 0
 
     return 0
 
