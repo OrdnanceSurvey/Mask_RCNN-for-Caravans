@@ -1,0 +1,20 @@
+# Detectron2 Caravan Detection Requirements
+#
+# Install PyTorch first (choose based on your CUDA version):
+# CUDA 11.8: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu118
+# CUDA 12.1: pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+# CPU only: pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+
+# Core dependencies
+numpy>=1.20
+opencv-python>=4.5
+pillow>=8.0
+
+# Detectron2 - install after PyTorch
+# pip install 'git+https://github.com/facebookresearch/detectron2.git'
+
+# Optional: for visualization
+matplotlib>=3.3
+
+# Optional: for data augmentation
+albumentations>=1.0
