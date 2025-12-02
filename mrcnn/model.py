@@ -1930,8 +1930,9 @@ class MaskRCNN():
             # Duplicate across the batch dimension because Keras requires it
             # TODO: can this be optimized to avoid duplicating the anchors?
             anchors = np.broadcast_to(anchors, (config.BATCH_SIZE,) + anchors.shape)
-            # A hack to get around Keras's bad support for constants
-            anchors = KL.Lambda(lambda x: tf.Variable(anchors), name="anchors")(input_image)
+            # Use tf.constant instead of tf.Variable for TF2 compatibility
+            anchor_values = anchors
+            anchors = KL.Lambda(lambda x: tf.constant(anchor_values), name="anchors")(input_image)
         else:
             anchors = input_anchors
 
