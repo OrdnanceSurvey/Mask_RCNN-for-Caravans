@@ -2167,12 +2167,6 @@ class MaskRCNN():
             "rpn_class_loss",  "rpn_bbox_loss",
             "mrcnn_class_loss", "mrcnn_bbox_loss", "mrcnn_mask_loss"]
 
-        # Build the total loss
-        loss_layers = []
-        for name in loss_names:
-            layer = self.keras_model.get_layer(name)
-            loss_layers.append(layer)
-
         # Add L2 Regularization
         # Skip gamma and beta weights of batch normalization layers.
         reg_losses = [
@@ -2180,20 +2174,21 @@ class MaskRCNN():
             for w in self.keras_model.trainable_weights
             if 'gamma' not in w.name and 'beta' not in w.name]
 
-        # Create a custom loss function that combines all losses
-        def total_loss(y_true, y_pred):
-            loss = tf.constant(0.0)
-            for name, layer in zip(loss_names, loss_layers):
-                layer_loss = tf.reduce_mean(layer.output) * self.config.LOSS_WEIGHTS.get(name, 1.)
-                loss = loss + layer_loss
-            # Add regularization
-            loss = loss + tf.add_n(reg_losses)
-            return loss
-
-        # Compile with custom loss
+        # Compile - the model's losses come from the loss layers embedded in the graph
+        # We use a dummy lambda loss that returns 0 since actual losses are from add_loss
         self.keras_model.compile(
             optimizer=optimizer,
-            loss=[total_loss] + [None] * (len(self.keras_model.outputs) - 1))
+            loss=lambda y_true, y_pred: tf.constant(0.0))
+
+        # The actual losses are already part of the model through the loss layers
+        # Add regularization loss
+        self.keras_model.add_loss(lambda: tf.add_n(reg_losses))
+
+        # Add the named losses from the loss layers
+        for name in loss_names:
+            layer = self.keras_model.get_layer(name)
+            loss = tf.reduce_mean(layer.output, keepdims=True) * self.config.LOSS_WEIGHTS.get(name, 1.)
+            self.keras_model.add_loss(lambda l=loss: l)
 
     def set_trainable(self, layer_regex, keras_model=None, indent=0, verbose=1):
         """Sets model layers as trainable if their names match
