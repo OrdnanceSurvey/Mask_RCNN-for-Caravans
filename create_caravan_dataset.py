@@ -696,7 +696,44 @@ def is_empty_plot(image, mask, threshold=0.6):
 # STEP 4: Generate training data (patches + masks)
 # =============================================================================
 
-def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_empty=True, verbose=True):
+def get_augmentations(image, mask):
+    """
+    Generate 8 augmented versions of an image and mask.
+
+    Produces:
+    - Original
+    - Rotated 90°, 180°, 270°
+    - Horizontal flip
+    - Horizontal flip + rotated 90°, 180°, 270°
+
+    Args:
+        image: PIL Image (RGB)
+        mask: PIL Image (L)
+
+    Returns:
+        list of tuples: [(suffix, augmented_image, augmented_mask), ...]
+    """
+    augmentations = []
+
+    # Original and rotations
+    augmentations.append(("", image, mask))
+    augmentations.append(("_r90", image.rotate(-90, expand=True), mask.rotate(-90, expand=True)))
+    augmentations.append(("_r180", image.rotate(180), mask.rotate(180)))
+    augmentations.append(("_r270", image.rotate(-270, expand=True), mask.rotate(-270, expand=True)))
+
+    # Horizontal flip and its rotations
+    img_flip = image.transpose(Image.FLIP_LEFT_RIGHT)
+    mask_flip = mask.transpose(Image.FLIP_LEFT_RIGHT)
+
+    augmentations.append(("_flip", img_flip, mask_flip))
+    augmentations.append(("_flip_r90", img_flip.rotate(-90, expand=True), mask_flip.rotate(-90, expand=True)))
+    augmentations.append(("_flip_r180", img_flip.rotate(180), mask_flip.rotate(180)))
+    augmentations.append(("_flip_r270", img_flip.rotate(-270, expand=True), mask_flip.rotate(-270, expand=True)))
+
+    return augmentations
+
+
+def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_empty=True, augment=True, verbose=True):
     """
     Generate training patches and masks from downloaded imagery.
 
@@ -705,6 +742,7 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_
         output_dir: Directory for training data output
         patch_size: Size of output patches (None = keep original size)
         filter_empty: If True, skip images where caravan plot appears empty
+        augment: If True, create 8x augmented versions (rotations + flips)
         verbose: Print progress messages
 
     Returns:
@@ -741,8 +779,11 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_
 
     stats = {'train': 0, 'val': 0, 'failed': 0, 'empty': 0}
 
-    if verbose and filter_empty:
-        print("Empty plot filtering: ENABLED")
+    if verbose:
+        if filter_empty:
+            print("Empty plot filtering: ENABLED")
+        if augment:
+            print("Augmentation: ENABLED (8x - rotations + flips)")
 
     for i, item in enumerate(metadata):
         if verbose and (i + 1) % 10 == 0:
@@ -788,18 +829,25 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_
             osm_id = item['feature']['properties']['osm_id']
             is_val = (i % 5 == 0)  # Every 5th image goes to validation
 
-            if is_val:
-                img_out = val_images / f"{osm_id}.tif"
-                mask_out = val_labels / f"{osm_id}.png"
-                stats['val'] += 1
+            # Get augmentations (8 versions if enabled, 1 if not)
+            if augment:
+                aug_list = get_augmentations(image_resized, mask_resized)
             else:
-                img_out = train_images / f"{osm_id}.tif"
-                mask_out = train_labels / f"{osm_id}.png"
-                stats['train'] += 1
+                aug_list = [("", image_resized, mask_resized)]
 
-            # Save
-            image_resized.save(img_out)
-            mask_resized.save(mask_out)
+            # Save all augmented versions
+            for suffix, aug_img, aug_mask in aug_list:
+                if is_val:
+                    img_out = val_images / f"{osm_id}{suffix}.tif"
+                    mask_out = val_labels / f"{osm_id}{suffix}.png"
+                    stats['val'] += 1
+                else:
+                    img_out = train_images / f"{osm_id}{suffix}.tif"
+                    mask_out = train_labels / f"{osm_id}{suffix}.png"
+                    stats['train'] += 1
+
+                aug_img.save(img_out)
+                aug_mask.save(mask_out)
 
         except Exception as e:
             if verbose:
@@ -984,7 +1032,7 @@ UK_CARAVAN_REGIONS = [
 ]
 
 
-def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, tight_crop=True, padding=0.5, size=256, filter_empty=True, verbose=True):
+def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, tight_crop=True, padding=0.5, size=256, filter_empty=True, augment=True, verbose=True):
     """
     Create a large dataset by fetching caravans from multiple UK regions.
 
@@ -997,6 +1045,7 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, ti
         padding: Padding multiplier (0.5 = 50% padding on each side)
         size: Fixed image size (only used if tight_crop=False)
         filter_empty: If True, filter out empty caravan plots
+        augment: If True, create 8x augmented versions (rotations + flips)
         verbose: Print progress
 
     Returns:
@@ -1082,7 +1131,7 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, ti
 
     # Step 4: Generate training data
     training_dir = output_dir / "training"
-    stats = step4_generate_training_data(imagery_dir, training_dir, filter_empty=filter_empty, verbose=verbose)
+    stats = step4_generate_training_data(imagery_dir, training_dir, filter_empty=filter_empty, augment=augment, verbose=verbose)
 
     if verbose:
         print(f"\n{'='*60}")
@@ -1166,6 +1215,7 @@ Example areas with caravans (UK):
     p_large.add_argument('--no-tight-crop', action='store_true', help='Disable tight cropping (use fixed size instead)')
     p_large.add_argument('--size', type=int, default=256, help='Fixed image size (only used with --no-tight-crop)')
     p_large.add_argument('--no-filter', action='store_true', help='Disable empty plot filtering (include all images)')
+    p_large.add_argument('--no-augment', action='store_true', help='Disable augmentation (no rotations/flips)')
 
     # Verify mask alignment
     p_verify = subparsers.add_parser('verify', help='Verify mask alignment on training data')
@@ -1250,7 +1300,8 @@ Example areas with caravans (UK):
             tight_crop=not args.no_tight_crop,
             padding=args.padding,
             size=args.size,
-            filter_empty=not args.no_filter
+            filter_empty=not args.no_filter,
+            augment=not args.no_augment
         )
         return 0 if result else 1
 
