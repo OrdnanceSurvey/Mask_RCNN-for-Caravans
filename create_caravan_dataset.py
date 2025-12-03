@@ -312,7 +312,7 @@ def step2_check_coverage(input_path, output_path, verbose=True):
 # STEP 3: Download imagery
 # =============================================================================
 
-def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=256, verbose=True):
+def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=256, tight_crop=True, padding=1.0, verbose=True):
     """
     Download aerial imagery tiles for caravan locations.
 
@@ -321,7 +321,9 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=
         output_dir: Directory to save imagery
         source: Imagery source ('esri', 'oam', or 'bing')
         zoom: Zoom level (19 recommended for tight caravan crops)
-        size: Image size in pixels (256 for tight single-caravan crops)
+        size: Image size in pixels (used if tight_crop=False)
+        tight_crop: If True, crop based on caravan polygon size + padding
+        padding: Padding multiplier around caravan (1.0 = 100% padding = 2x caravan size)
         verbose: Print progress messages
 
     Returns:
@@ -359,14 +361,41 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=
         center_lon = sum(lons) / len(lons)
         center_lat = sum(lats) / len(lats)
 
-        # Calculate bounding box with padding
-        padding = 0.0005  # ~50m padding
-        feat_bbox = [
-            min(lons) - padding,
-            min(lats) - padding,
-            max(lons) + padding,
-            max(lats) + padding
-        ]
+        # Calculate feature size in degrees
+        feat_width_deg = max(lons) - min(lons)
+        feat_height_deg = max(lats) - min(lats)
+
+        # Calculate crop size based on caravan size
+        if tight_crop:
+            # Convert degrees to approximate pixels at this zoom level
+            # At zoom z, the world is 256 * 2^z pixels wide
+            # 360 degrees = 256 * 2^z pixels
+            pixels_per_degree_lon = (256 * (2 ** zoom)) / 360
+            # Latitude is more complex due to Mercator projection, approximate for now
+            pixels_per_degree_lat = pixels_per_degree_lon * np.cos(np.radians(center_lat))
+
+            feat_width_px = feat_width_deg * pixels_per_degree_lon
+            feat_height_px = feat_height_deg * pixels_per_degree_lat
+
+            # Make it square, use the larger dimension
+            feat_size_px = max(feat_width_px, feat_height_px)
+
+            # Add padding (e.g., padding=1.0 means 100% padding on each side = 3x total size)
+            crop_size = int(feat_size_px * (1 + 2 * padding))
+
+            # Ensure minimum size of 64 and maximum of 512
+            crop_size = max(64, min(512, crop_size))
+
+            # Round to nearest multiple of 32 for efficiency
+            crop_size = ((crop_size + 31) // 32) * 32
+
+            if verbose and i < 5:  # Show size calculation for first 5
+                print(f"  Caravan size: {feat_width_px:.0f}x{feat_height_px:.0f}px -> crop: {crop_size}x{crop_size}px")
+        else:
+            crop_size = size
+
+        # Feature bounding box (for reference)
+        feat_bbox = [min(lons), min(lats), max(lons), max(lats)]
 
         # Download imagery
         try:
@@ -375,7 +404,7 @@ def step3_download_imagery(input_path, output_dir, source='esri', zoom=19, size=
                 output_dir / f"caravan_{feature['properties']['osm_id']}.png",
                 source=source,
                 zoom=zoom,
-                size=size
+                size=crop_size
             )
 
             if result and result[0]:
@@ -801,7 +830,7 @@ UK_CARAVAN_REGIONS = [
 ]
 
 
-def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, size=256, verbose=True):
+def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, tight_crop=True, padding=0.5, size=256, verbose=True):
     """
     Create a large dataset by fetching caravans from multiple UK regions.
 
@@ -810,7 +839,9 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, si
         target_count: Target number of caravan images (default: 1000)
         source: Imagery source
         zoom: Zoom level (19 recommended for tight crops)
-        size: Image size in pixels (256 for single-caravan crops)
+        tight_crop: If True, crop based on caravan size + padding
+        padding: Padding multiplier (0.5 = 50% padding on each side)
+        size: Fixed image size (only used if tight_crop=False)
         verbose: Print progress
 
     Returns:
@@ -891,7 +922,8 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, si
 
     # Step 3: Download imagery (tight crops around each caravan)
     imagery_dir = output_dir / "imagery"
-    step3_download_imagery(coverage_path, imagery_dir, source=source, zoom=zoom, size=size, verbose=verbose)
+    step3_download_imagery(coverage_path, imagery_dir, source=source, zoom=zoom,
+                          size=size, tight_crop=tight_crop, padding=padding, verbose=verbose)
 
     # Step 4: Generate training data
     training_dir = output_dir / "training"
@@ -975,7 +1007,9 @@ Example areas with caravans (UK):
     p_large.add_argument('--output', default='data/large_dataset/', help='Output directory')
     p_large.add_argument('--source', default='esri', choices=['esri', 'oam'], help='Imagery source')
     p_large.add_argument('--zoom', type=int, default=19, help='Zoom level (19 for tight crops)')
-    p_large.add_argument('--size', type=int, default=256, help='Image size (256 for single-caravan crops)')
+    p_large.add_argument('--padding', type=float, default=0.5, help='Padding around caravan (0.5 = 50%% on each side)')
+    p_large.add_argument('--no-tight-crop', action='store_true', help='Disable tight cropping (use fixed size instead)')
+    p_large.add_argument('--size', type=int, default=256, help='Fixed image size (only used with --no-tight-crop)')
 
     # Verify mask alignment
     p_verify = subparsers.add_parser('verify', help='Verify mask alignment on training data')
@@ -1057,6 +1091,8 @@ Example areas with caravans (UK):
             target_count=args.count,
             source=args.source,
             zoom=args.zoom,
+            tight_crop=not args.no_tight_crop,
+            padding=args.padding,
             size=args.size
         )
         return 0 if result else 1
