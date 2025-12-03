@@ -573,10 +573,130 @@ requests.io = io
 
 
 # =============================================================================
+# Empty plot detection
+# =============================================================================
+
+def is_empty_plot(image, mask, threshold=0.6):
+    """
+    Detect if a caravan plot is empty (just grass) by analyzing the masked region.
+
+    Empty plots have:
+    - Low color variance (uniformly green)
+    - Low edge density (no sharp edges)
+    - Similar appearance to surrounding grass
+
+    Args:
+        image: PIL Image (RGB)
+        mask: PIL Image (L) with polygon mask
+        threshold: Score threshold (0-1). Higher = stricter filtering
+
+    Returns:
+        bool: True if the plot appears empty (no caravan), False if occupied
+    """
+    img_array = np.array(image)
+    mask_array = np.array(mask)
+
+    # Get pixels inside the mask
+    mask_bool = mask_array > 0
+    if mask_bool.sum() < 50:  # Too few pixels to analyze
+        return True
+
+    masked_pixels = img_array[mask_bool]
+
+    # 1. Color variance analysis
+    # Caravans tend to be white/cream/tan, grass is green
+    # Calculate standard deviation of each color channel
+    r_std = np.std(masked_pixels[:, 0])
+    g_std = np.std(masked_pixels[:, 1])
+    b_std = np.std(masked_pixels[:, 2])
+    color_variance = (r_std + g_std + b_std) / 3
+
+    # 2. Check if predominantly green (grass)
+    r_mean = np.mean(masked_pixels[:, 0])
+    g_mean = np.mean(masked_pixels[:, 1])
+    b_mean = np.mean(masked_pixels[:, 2])
+
+    # Grass has higher green relative to red and blue
+    green_ratio = g_mean / (r_mean + b_mean + 1)
+    is_green = green_ratio > 0.55  # Mostly green
+
+    # 3. Brightness analysis
+    # Caravans are usually brighter (white/cream colored)
+    brightness = (r_mean + g_mean + b_mean) / 3
+    is_dark = brightness < 100  # Darker pixels suggest shadow/grass
+
+    # 4. Edge detection within the masked region
+    # Convert to grayscale and detect edges
+    gray = np.mean(img_array, axis=2)
+
+    # Simple edge detection using gradient
+    dx = np.abs(np.diff(gray, axis=1))
+    dy = np.abs(np.diff(gray, axis=0))
+
+    # Pad to match original size
+    dx = np.pad(dx, ((0, 0), (0, 1)), mode='edge')
+    dy = np.pad(dy, ((0, 1), (0, 0)), mode='edge')
+
+    edges = np.sqrt(dx**2 + dy**2)
+    edge_mean = np.mean(edges[mask_bool])
+
+    # 5. Contrast with surrounding area
+    # Dilate mask to get surrounding pixels
+    try:
+        from scipy import ndimage
+        dilated = ndimage.binary_dilation(mask_bool, iterations=5)
+        surrounding = dilated & ~mask_bool
+
+        if surrounding.sum() > 10:
+            surrounding_brightness = np.mean(img_array[surrounding])
+            masked_brightness = np.mean(masked_pixels)
+            contrast = abs(masked_brightness - surrounding_brightness)
+        else:
+            contrast = 0
+    except ImportError:
+        # scipy not available, skip contrast check
+        contrast = 0
+
+    # Scoring: higher score = more likely to be a caravan
+    score = 0
+
+    # Color variance (caravans have varied colors from roof, walls, etc.)
+    if color_variance > 20:
+        score += 0.3
+    elif color_variance > 10:
+        score += 0.15
+
+    # Not predominantly green
+    if not is_green:
+        score += 0.25
+
+    # Brighter than typical grass
+    if brightness > 120:
+        score += 0.2
+    elif brightness > 100:
+        score += 0.1
+
+    # Has edges (rectangular structure)
+    if edge_mean > 15:
+        score += 0.25
+    elif edge_mean > 8:
+        score += 0.1
+
+    # Contrasts with surroundings
+    if contrast > 30:
+        score += 0.15
+    elif contrast > 15:
+        score += 0.08
+
+    # Return True (empty) if score is below threshold
+    return score < threshold
+
+
+# =============================================================================
 # STEP 4: Generate training data (patches + masks)
 # =============================================================================
 
-def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose=True):
+def step4_generate_training_data(input_dir, output_dir, patch_size=None, filter_empty=True, verbose=True):
     """
     Generate training patches and masks from downloaded imagery.
 
@@ -584,6 +704,7 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose
         input_dir: Directory with downloaded imagery and metadata.json
         output_dir: Directory for training data output
         patch_size: Size of output patches (None = keep original size)
+        filter_empty: If True, skip images where caravan plot appears empty
         verbose: Print progress messages
 
     Returns:
@@ -618,11 +739,14 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose
     for d in [train_images, train_labels, val_images, val_labels]:
         d.mkdir(parents=True, exist_ok=True)
 
-    stats = {'train': 0, 'val': 0, 'failed': 0}
+    stats = {'train': 0, 'val': 0, 'failed': 0, 'empty': 0}
+
+    if verbose and filter_empty:
+        print("Empty plot filtering: ENABLED")
 
     for i, item in enumerate(metadata):
         if verbose and (i + 1) % 10 == 0:
-            print(f"Processing {i+1}/{len(metadata)}")
+            print(f"Processing {i+1}/{len(metadata)} (train: {stats['train']}, val: {stats['val']}, empty: {stats['empty']})")
 
         try:
             # Load image
@@ -641,6 +765,16 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose
                 img_width,
                 img_height
             )
+
+            # Filter out empty plots (just grass, no caravan)
+            if filter_empty:
+                try:
+                    if is_empty_plot(image, mask):
+                        stats['empty'] += 1
+                        continue
+                except Exception as e:
+                    # If filtering fails, include the image anyway
+                    pass
 
             # Resize to patch size if specified, otherwise keep original
             if patch_size:
@@ -678,6 +812,7 @@ def step4_generate_training_data(input_dir, output_dir, patch_size=None, verbose
         print(f"\nStatistics:")
         print(f"  - Training images: {stats['train']}")
         print(f"  - Validation images: {stats['val']}")
+        print(f"  - Empty plots filtered: {stats['empty']}")
         print(f"  - Failed: {stats['failed']}")
         print(f"\nDirectory structure:")
         print(f"  {output_dir}/")
@@ -849,7 +984,7 @@ UK_CARAVAN_REGIONS = [
 ]
 
 
-def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, tight_crop=True, padding=0.5, size=256, verbose=True):
+def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, tight_crop=True, padding=0.5, size=256, filter_empty=True, verbose=True):
     """
     Create a large dataset by fetching caravans from multiple UK regions.
 
@@ -861,6 +996,7 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, ti
         tight_crop: If True, crop based on caravan size + padding
         padding: Padding multiplier (0.5 = 50% padding on each side)
         size: Fixed image size (only used if tight_crop=False)
+        filter_empty: If True, filter out empty caravan plots
         verbose: Print progress
 
     Returns:
@@ -946,7 +1082,7 @@ def step_large_dataset(output_dir, target_count=1000, source='esri', zoom=19, ti
 
     # Step 4: Generate training data
     training_dir = output_dir / "training"
-    stats = step4_generate_training_data(imagery_dir, training_dir, verbose=verbose)
+    stats = step4_generate_training_data(imagery_dir, training_dir, filter_empty=filter_empty, verbose=verbose)
 
     if verbose:
         print(f"\n{'='*60}")
@@ -1029,6 +1165,7 @@ Example areas with caravans (UK):
     p_large.add_argument('--padding', type=float, default=0.5, help='Padding around caravan (0.5 = 50%% on each side)')
     p_large.add_argument('--no-tight-crop', action='store_true', help='Disable tight cropping (use fixed size instead)')
     p_large.add_argument('--size', type=int, default=256, help='Fixed image size (only used with --no-tight-crop)')
+    p_large.add_argument('--no-filter', action='store_true', help='Disable empty plot filtering (include all images)')
 
     # Verify mask alignment
     p_verify = subparsers.add_parser('verify', help='Verify mask alignment on training data')
@@ -1112,7 +1249,8 @@ Example areas with caravans (UK):
             zoom=args.zoom,
             tight_crop=not args.no_tight_crop,
             padding=args.padding,
-            size=args.size
+            size=args.size,
+            filter_empty=not args.no_filter
         )
         return 0 if result else 1
 
