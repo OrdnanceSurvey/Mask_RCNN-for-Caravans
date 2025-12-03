@@ -465,10 +465,18 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=256)
         tuple: (Path to saved image, actual_bbox) where actual_bbox is [west, south, east, north]
                Returns (None, None) if failed
     """
-    # Convert lat/lon to tile coordinates
+    # Convert lat/lon to FRACTIONAL tile coordinates
     n = 2 ** zoom
-    tile_x = int((lon + 180) / 360 * n)
-    tile_y = int((1 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2 * n)
+    tile_x_frac = (lon + 180) / 360 * n
+    tile_y_frac = (1 - np.arcsinh(np.tan(np.radians(lat))) / np.pi) / 2 * n
+
+    # Integer tile coordinates
+    tile_x = int(tile_x_frac)
+    tile_y = int(tile_y_frac)
+
+    # Fractional position within the tile (0-1)
+    frac_x = tile_x_frac - tile_x
+    frac_y = tile_y_frac - tile_y
 
     # Calculate how many tiles we need for the desired size
     tiles_needed = (size // 256) + 2  # 256 is standard tile size
@@ -514,9 +522,20 @@ def download_tile_image(lon, lat, output_path, source='esri', zoom=18, size=256)
         for x, tile in enumerate(row):
             stitched.paste(tile, (x * 256, y * 256))
 
-    # Crop to center
-    left = (total_width - size) // 2
-    top = (total_height - size) // 2
+    # Calculate the EXACT pixel position of the center point in the stitched image
+    # The center tile (tile_x, tile_y) is at grid position (half, half)
+    # Within that tile, the center point is at fractional position (frac_x, frac_y)
+    center_px_x = half * 256 + int(frac_x * 256)
+    center_px_y = half * 256 + int(frac_y * 256)
+
+    # Crop centered on the actual center point
+    left = center_px_x - size // 2
+    top = center_px_y - size // 2
+
+    # Ensure we don't go out of bounds
+    left = max(0, min(left, total_width - size))
+    top = max(0, min(top, total_height - size))
+
     cropped = stitched.crop((left, top, left + size, top + size))
 
     # Calculate the ACTUAL bounding box of the cropped image
