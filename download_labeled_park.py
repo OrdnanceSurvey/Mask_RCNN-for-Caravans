@@ -27,23 +27,30 @@ from pathlib import Path
 from PIL import Image, ImageDraw
 import time
 
-# UK regions
+# UK regions - smaller regions work better with Overpass API
 UK_REGIONS = {
-    "uk": "-10.5,49.5,2.0,61.0",
+    # Smaller, focused regions (recommended)
+    "anglesey": "-4.7,53.1,-4.0,53.5",
+    "north_wales_coast": "-4.0,53.1,-3.3,53.4",
+    "pembrokeshire": "-5.3,51.6,-4.7,52.1",
+    "cornwall": "-5.8,49.9,-4.5,50.7",
+    "devon_south": "-4.2,50.2,-3.4,50.7",
+    "dorset": "-2.9,50.5,-1.8,50.9",
+    "norfolk": "0.5,52.5,1.8,53.0",
+    "suffolk": "1.2,51.9,1.8,52.5",
+    "essex": "0.5,51.5,1.2,51.9",
+    "kent": "0.8,50.9,1.4,51.4",
+    "yorkshire_coast": "-0.5,53.6,0.2,54.2",
+    "lincolnshire": "-0.2,53.0,0.4,53.6",
+    "lancashire": "-3.2,53.5,-2.8,54.0",
+    "cumbria": "-3.6,54.0,-3.0,54.5",
+    # Larger regions (may timeout)
     "wales": "-5.5,51.3,-2.6,53.5",
-    "england_south": "-5.7,49.9,1.8,52.0",
-    "england_north": "-3.5,52.0,0.5,55.8",
-    "scotland": "-7.5,54.5,-0.5,61.0",
-    "east_anglia": "0.0,51.5,2.0,53.5",
-    "cornwall": "-5.8,49.9,-4.2,51.2",
-    "devon": "-4.7,50.2,-2.9,51.3",
-    "yorkshire": "-2.5,53.3,0.0,54.6",
-    "lincolnshire": "-0.8,52.7,0.4,53.7",
-    "norfolk": "0.3,52.3,2.0,53.1",
+    "scotland_east": "-3.5,55.5,-1.5,56.5",
 }
 
 
-def query_park_with_caravans(way_id=None, bbox=None, verbose=True):
+def query_park_with_caravans(way_id=None, bbox=None, verbose=True, retries=3):
     """
     Query OSM for a specific park and all caravans within it.
 
@@ -52,18 +59,15 @@ def query_park_with_caravans(way_id=None, bbox=None, verbose=True):
     if way_id:
         # Query specific park and nearby caravans
         query = f"""
-        [out:json][timeout:120];
+        [out:json][timeout:60];
 
         // Get the park
         way({way_id});
         (._;>;);
         out body;
 
-        // Get park bounds for caravan search
+        // Get all caravans near this park (500m radius)
         way({way_id});
-        map_to_area -> .park;
-
-        // Get all caravans in/near the park
         (
             way["building"="static_caravan"](around:500);
         );
@@ -73,7 +77,7 @@ def query_park_with_caravans(way_id=None, bbox=None, verbose=True):
     elif bbox:
         west, south, east, north = map(float, bbox.split(","))
         query = f"""
-        [out:json][timeout:180];
+        [out:json][timeout:90];
         (
             way["tourism"="caravan_site"]({south},{west},{north},{east});
             way["building"="static_caravan"]({south},{west},{north},{east});
@@ -87,13 +91,36 @@ def query_park_with_caravans(way_id=None, bbox=None, verbose=True):
     if verbose:
         print("Querying OpenStreetMap...")
 
-    response = requests.post(
+    # Try multiple Overpass servers with retries
+    servers = [
         "https://overpass-api.de/api/interpreter",
-        data={"data": query},
-        timeout=180
-    )
-    response.raise_for_status()
-    return response.json()
+        "https://overpass.kumi.systems/api/interpreter",
+        "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
+    ]
+
+    last_error = None
+    for attempt in range(retries):
+        for server in servers:
+            try:
+                if verbose and attempt > 0:
+                    print(f"  Retry {attempt + 1}/{retries} using {server.split('/')[2]}...")
+
+                response = requests.post(
+                    server,
+                    data={"data": query},
+                    timeout=120
+                )
+                response.raise_for_status()
+                return response.json()
+
+            except requests.exceptions.RequestException as e:
+                last_error = e
+                if verbose:
+                    print(f"  Server error: {type(e).__name__}")
+                time.sleep(2)  # Wait before trying next server
+                continue
+
+    raise last_error or Exception("All servers failed")
 
 
 def parse_osm_data(data):
@@ -431,9 +458,10 @@ def main():
 
     # Search command
     p_search = subparsers.add_parser('search', help='Find parks with labeled caravans')
-    p_search.add_argument('--region', default='wales', choices=UK_REGIONS.keys())
+    p_search.add_argument('--region', default='anglesey', choices=UK_REGIONS.keys(),
+                          help='Region to search (default: anglesey). Smaller regions are faster.')
     p_search.add_argument('--bbox', help='Custom bbox: "west,south,east,north"')
-    p_search.add_argument('--min-caravans', type=int, default=10)
+    p_search.add_argument('--min-caravans', type=int, default=5, help='Minimum caravans (default: 5)')
     p_search.add_argument('--top', type=int, default=20)
 
     # Download command
@@ -444,12 +472,13 @@ def main():
 
     # Download top parks
     p_top = subparsers.add_parser('download-top', help='Download top N parks')
-    p_top.add_argument('--region', default='wales', choices=UK_REGIONS.keys())
+    p_top.add_argument('--region', default='anglesey', choices=UK_REGIONS.keys(),
+                       help='Region to search (default: anglesey)')
     p_top.add_argument('--bbox', help='Custom bbox')
     p_top.add_argument('--count', type=int, default=5)
     p_top.add_argument('--output', default='parks_data/', help='Output directory')
     p_top.add_argument('--zoom', type=int, default=18)
-    p_top.add_argument('--min-caravans', type=int, default=20)
+    p_top.add_argument('--min-caravans', type=int, default=10, help='Minimum caravans per park')
 
     args = parser.parse_args()
 
