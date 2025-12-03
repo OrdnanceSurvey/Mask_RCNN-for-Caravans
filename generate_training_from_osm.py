@@ -233,7 +233,7 @@ def pixel_to_geo(px, py, img_bbox, img_size):
     return lon, lat
 
 
-def create_tiles_from_park(park, zoom=18, tile_size=2048, overlap=256, verbose=True):
+def create_tiles_from_park(park, zoom=18, tile_size=2048, overlap=256, min_tile_caravans=1, verbose=True):
     """
     Create training tiles from a park.
 
@@ -242,13 +242,28 @@ def create_tiles_from_park(park, zoom=18, tile_size=2048, overlap=256, verbose=T
     if verbose:
         print(f"\nProcessing: {park['name']} ({park['caravan_count']} caravans)")
 
-    # Download full park imagery
+    # Download full park imagery with extra padding to ensure we can create full tiles
     park_bbox = park['bbox']
-    full_image, img_bbox = download_tiles(park_bbox, zoom, verbose)
+
+    # Add padding to park bbox to ensure we have enough imagery for full tiles
+    west, south, east, north = park_bbox
+    # Calculate approximate degrees per pixel at this zoom
+    deg_per_tile = 360 / (2 ** zoom)
+    padding_deg = (tile_size / 256) * deg_per_tile * 0.5  # Extra padding
+
+    padded_bbox = (west - padding_deg, south - padding_deg, east + padding_deg, north + padding_deg)
+
+    full_image, img_bbox = download_tiles(padded_bbox, zoom, verbose)
     img_w, img_h = full_image.size
 
     if verbose:
         print(f"  Full image size: {img_w}x{img_h}")
+
+    # Skip if image is too small even with padding
+    if img_w < tile_size or img_h < tile_size:
+        if verbose:
+            print(f"  Skipping: park image too small ({img_w}x{img_h} < {tile_size}x{tile_size})")
+        return []
 
     # Convert all caravan polygons to pixel coordinates
     caravans_px = []
@@ -260,22 +275,20 @@ def create_tiles_from_park(park, zoom=18, tile_size=2048, overlap=256, verbose=T
             'coords': pixel_coords
         })
 
-    # Generate tiles
+    # Generate tiles - ensure we only create full-size tiles
     tiles = []
     step = tile_size - overlap
 
     tile_idx = 0
-    for y in range(0, max(1, img_h - tile_size + 1), step):
-        for x in range(0, max(1, img_w - tile_size + 1), step):
-            # Extract tile
+    y = 0
+    while y + tile_size <= img_h:
+        x = 0
+        while x + tile_size <= img_w:
+            # Extract tile - guaranteed to be full size
             tile_img = full_image.crop((x, y, x + tile_size, y + tile_size))
 
-            # Handle edge cases where tile would extend beyond image
-            if tile_img.size != (tile_size, tile_size):
-                # Pad with black if needed
-                padded = Image.new('RGB', (tile_size, tile_size), (0, 0, 0))
-                padded.paste(tile_img, (0, 0))
-                tile_img = padded
+            # Verify size (should always be correct now)
+            assert tile_img.size == (tile_size, tile_size), f"Tile size mismatch: {tile_img.size}"
 
             # Find caravans in this tile
             tile_annotations = []
@@ -312,24 +325,28 @@ def create_tiles_from_park(park, zoom=18, tile_size=2048, overlap=256, verbose=T
                     'bbox': bbox
                 })
 
-            # Calculate tile's geo bbox
-            tile_west, tile_north = pixel_to_geo(x, y, img_bbox, full_image.size)
-            tile_east, tile_south = pixel_to_geo(x + tile_size, y + tile_size, img_bbox, full_image.size)
-            tile_bbox = (tile_west, tile_south, tile_east, tile_north)
+            # Only keep tiles with enough caravans
+            if len(tile_annotations) >= min_tile_caravans:
+                # Calculate tile's geo bbox
+                tile_west, tile_north = pixel_to_geo(x, y, img_bbox, full_image.size)
+                tile_east, tile_south = pixel_to_geo(x + tile_size, y + tile_size, img_bbox, full_image.size)
+                tile_bbox = (tile_west, tile_south, tile_east, tile_north)
 
-            tiles.append({
-                'image': tile_img,
-                'annotations': tile_annotations,
-                'bbox': tile_bbox,
-                'park_id': park['id'],
-                'tile_idx': tile_idx
-            })
+                tiles.append({
+                    'image': tile_img,
+                    'annotations': tile_annotations,
+                    'bbox': tile_bbox,
+                    'park_id': park['id'],
+                    'tile_idx': tile_idx
+                })
             tile_idx += 1
 
+            x += step
+        y += step
+
     if verbose:
-        tiles_with_caravans = sum(1 for t in tiles if len(t['annotations']) > 0)
         total_annotations = sum(len(t['annotations']) for t in tiles)
-        print(f"  Generated {len(tiles)} tiles ({tiles_with_caravans} with caravans, {total_annotations} total annotations)")
+        print(f"  Generated {len(tiles)} tiles ({tile_size}x{tile_size}), {total_annotations} total annotations")
 
     return tiles
 
