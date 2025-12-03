@@ -441,19 +441,27 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-    # Generate from a region (finds parks automatically)
+    # Generate from a single region
     python generate_training_from_osm.py --region anglesey --output training_data/
 
-    # Match your inference setup
+    # Generate from MULTIPLE regions
+    python generate_training_from_osm.py --region anglesey --region cornwall --region norfolk --output training_data/
+
+    # Generate from ALL available regions
+    python generate_training_from_osm.py --all-regions --output training_data/
+
+    # Match your inference setup (zoom 18, 2048x2048)
     python generate_training_from_osm.py --region cornwall --zoom 18 --tile-size 2048 --output data/
 
-    # Download specific parks
+    # Download specific parks by OSM way ID
     python generate_training_from_osm.py --way-ids 123456789,987654321 --output data/
         """
     )
 
-    parser.add_argument('--region', choices=UK_REGIONS.keys(),
-                        help='Region to search for parks')
+    parser.add_argument('--region', choices=UK_REGIONS.keys(), action='append',
+                        help='Region(s) to search. Can specify multiple times: --region anglesey --region cornwall')
+    parser.add_argument('--all-regions', action='store_true',
+                        help='Search ALL available regions')
     parser.add_argument('--bbox', help='Custom bbox: "west,south,east,north"')
     parser.add_argument('--way-ids', help='Comma-separated OSM way IDs of specific parks')
     parser.add_argument('--output', default='training_data/', help='Output directory')
@@ -461,13 +469,22 @@ Examples:
     parser.add_argument('--tile-size', type=int, default=2048, help='Tile size in pixels (default: 2048)')
     parser.add_argument('--overlap', type=int, default=256, help='Tile overlap in pixels (default: 256)')
     parser.add_argument('--min-caravans', type=int, default=10, help='Minimum caravans per park')
-    parser.add_argument('--max-parks', type=int, default=10, help='Maximum parks to process')
+    parser.add_argument('--max-parks-per-region', type=int, default=5, help='Maximum parks per region')
     parser.add_argument('--train-split', type=float, default=0.8, help='Training split ratio')
 
     args = parser.parse_args()
 
-    if not args.region and not args.bbox and not args.way_ids:
-        parser.error("Must specify --region, --bbox, or --way-ids")
+    # Determine regions to search
+    if args.all_regions:
+        regions = list(UK_REGIONS.keys())
+    elif args.region:
+        regions = args.region
+    elif args.bbox or args.way_ids:
+        regions = []  # Will use bbox or way_ids instead
+    else:
+        # Default to a few good regions
+        regions = ['anglesey', 'cornwall', 'norfolk']
+        print(f"No region specified, using defaults: {regions}")
 
     print("="*60)
     print("GENERATING TRAINING DATASET FROM OSM")
@@ -505,25 +522,43 @@ Examples:
             time.sleep(2)
 
     else:
-        # Search region for parks
-        bbox = args.bbox or UK_REGIONS[args.region]
-        print(f"\nSearching region: {args.region or 'custom'}")
+        # Search regions for parks
+        if args.bbox:
+            # Custom bbox
+            regions_to_search = [('custom', args.bbox)]
+        else:
+            # Named regions
+            regions_to_search = [(r, UK_REGIONS[r]) for r in regions]
 
-        data = query_osm(bbox=bbox)
-        parks, caravans = parse_osm_data(data)
-        parks = match_caravans_to_parks(parks, caravans)
+        print(f"\nSearching {len(regions_to_search)} region(s): {[r[0] for r in regions_to_search]}")
 
-        # Filter and sort
-        parks = [p for p in parks if p['caravan_count'] >= args.min_caravans]
-        parks.sort(key=lambda x: x['caravan_count'], reverse=True)
-        parks = parks[:args.max_parks]
+        for region_name, bbox in regions_to_search:
+            print(f"\n{'='*40}")
+            print(f"Region: {region_name}")
+            print(f"{'='*40}")
 
-        print(f"\nFound {len(parks)} parks with {args.min_caravans}+ caravans")
+            try:
+                data = query_osm(bbox=bbox)
+                parks, caravans = parse_osm_data(data)
+                parks = match_caravans_to_parks(parks, caravans)
 
-        for park in parks:
-            tiles = create_tiles_from_park(park, args.zoom, args.tile_size, args.overlap)
-            all_tiles.extend(tiles)
-            time.sleep(2)
+                # Filter and sort
+                parks = [p for p in parks if p['caravan_count'] >= args.min_caravans]
+                parks.sort(key=lambda x: x['caravan_count'], reverse=True)
+                parks = parks[:args.max_parks_per_region]
+
+                print(f"Found {len(parks)} parks with {args.min_caravans}+ caravans")
+
+                for park in parks:
+                    tiles = create_tiles_from_park(park, args.zoom, args.tile_size, args.overlap)
+                    all_tiles.extend(tiles)
+                    time.sleep(2)
+
+            except Exception as e:
+                print(f"Error processing region {region_name}: {e}")
+                continue
+
+            time.sleep(3)  # Rate limit between regions
 
     if not all_tiles:
         print("\nNo tiles generated! Try a different region or lower --min-caravans")
