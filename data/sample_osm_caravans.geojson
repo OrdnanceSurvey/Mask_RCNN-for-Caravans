@@ -1,0 +1,47 @@
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "osm_id": 123456789,
+        "feature_type": "static_caravan",
+        "tags": {
+          "building": "static_caravan"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-4.3521, 53.2145],
+          [-4.3518, 53.2145],
+          [-4.3518, 53.2142],
+          [-4.3521, 53.2142],
+          [-4.3521, 53.2145]
+        ]]
+      }
+    },
+    {
+      "type": "Feature",
+      "properties": {
+        "osm_id": 987654321,
+        "feature_type": "caravan_site",
+        "tags": {
+          "tourism": "caravan_site",
+          "name": "Example Caravan Park"
+        }
+      },
+      "geometry": {
+        "type": "Polygon",
+        "coordinates": [[
+          [-4.3550, 53.2160],
+          [-4.3500, 53.2160],
+          [-4.3500, 53.2130],
+          [-4.3550, 53.2130],
+          [-4.3550, 53.2160]
+        ]]
+      }
+    }
+  ],
+  "note": "This is sample data. Run step1_osm on your machine to get real OSM data."
+}
