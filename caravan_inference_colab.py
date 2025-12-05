@@ -168,7 +168,59 @@ def sliding_window_inference(image, model, transform, patch_size=48, stride=16,
 """
 
 # =============================================================================
-# CELL 5: Clustering Detections
+# CELL 5a: Count Individual Caravans (deduplicate overlapping detections)
+# =============================================================================
+"""
+def count_individual_caravans(detections, merge_radius=20):
+    '''
+    Merge overlapping detections to count individual caravans.
+
+    Since we use a sliding window with stride < patch_size, each caravan
+    will trigger multiple overlapping detections. This function merges
+    nearby detections into single caravan locations.
+
+    Args:
+        detections: List of (x, y, confidence) from sliding window
+        merge_radius: Max distance to merge detections (roughly caravan size / 2)
+
+    Returns:
+        caravans: List of (x, y, confidence) for each unique caravan
+    '''
+    if len(detections) == 0:
+        return []
+
+    coords = np.array([(d[0], d[1]) for d in detections])
+    confidences = np.array([d[2] for d in detections])
+
+    # Use DBSCAN to merge nearby points
+    # eps = merge_radius, min_samples = 1 (single detection is enough)
+    clustering = DBSCAN(eps=merge_radius, min_samples=1).fit(coords)
+    labels = clustering.labels_
+
+    caravans = []
+    for label in set(labels):
+        if label == -1:
+            continue
+
+        mask = labels == label
+        cluster_coords = coords[mask]
+        cluster_confs = confidences[mask]
+
+        # Use confidence-weighted centroid
+        weights = cluster_confs / cluster_confs.sum()
+        centroid_x = (cluster_coords[:, 0] * weights).sum()
+        centroid_y = (cluster_coords[:, 1] * weights).sum()
+        max_conf = cluster_confs.max()
+
+        caravans.append((centroid_x, centroid_y, max_conf))
+
+    print(f"Merged {len(detections)} detections into {len(caravans)} individual caravans")
+
+    return caravans
+"""
+
+# =============================================================================
+# CELL 5b: Cluster Caravans into Parks
 # =============================================================================
 """
 def cluster_detections(detections, eps=30, min_samples=3, min_cluster_size=5):
@@ -323,21 +375,29 @@ heatmap, detections = sliding_window_inference(
     device=device
 )
 
-# Cluster detections
-clusters = cluster_detections(
+# Count individual caravans (merge overlapping detections)
+caravans = count_individual_caravans(
     detections,
-    eps=40,              # Max distance between caravans in same park
+    merge_radius=20      # Roughly half a caravan width in pixels
+)
+
+# Optionally cluster into parks (for finding caravan park locations)
+clusters = cluster_detections(
+    caravans,            # Use deduplicated caravans, not raw detections
+    eps=60,              # Max distance between caravans in same park
     min_samples=3,       # Min points to form cluster
     min_cluster_size=5   # Min caravans to call it a "park"
 )
 
-# Visualize
-visualize_results(image, heatmap, detections, clusters)
+# Visualize (show individual caravans, not raw overlapping detections)
+visualize_results(image, heatmap, caravans, clusters)
 
 # Save annotated image
-result_img = draw_detections_on_image(image, clusters, detections)
+result_img = draw_detections_on_image(image, clusters, caravans)
 result_img.save('result_annotated.png')
 print("Saved annotated image to result_annotated.png")
+
+print(f"\\n*** TOTAL CARAVANS DETECTED: {len(caravans)} ***")
 """
 
 # =============================================================================
@@ -347,16 +407,30 @@ print("Saved annotated image to result_annotated.png")
 print("\\n" + "="*50)
 print("DETECTION SUMMARY")
 print("="*50)
-print(f"Total high-confidence detections: {len(detections)}")
+print(f"Raw sliding window detections: {len(detections)}")
+print(f"Individual caravans (after merging): {len(caravans)}")
 print(f"Caravan parks/clusters found: {len(clusters)}")
 print()
 
-for i, cluster in enumerate(clusters):
-    print(f"Cluster {i+1}:")
-    print(f"  - Caravans detected: {cluster['num_caravans']}")
-    print(f"  - Average confidence: {cluster['avg_confidence']:.2%}")
-    print(f"  - Location: center at ({cluster['center'][0]:.0f}, {cluster['center'][1]:.0f})")
+# Show confidence distribution
+if caravans:
+    confs = [c[2] for c in caravans]
+    print(f"Confidence stats:")
+    print(f"  - Min: {min(confs):.2%}")
+    print(f"  - Max: {max(confs):.2%}")
+    print(f"  - Mean: {np.mean(confs):.2%}")
     print()
+
+for i, cluster in enumerate(clusters):
+    print(f"Park/Cluster {i+1}:")
+    print(f"  - Caravans: {cluster['num_caravans']}")
+    print(f"  - Avg confidence: {cluster['avg_confidence']:.2%}")
+    print(f"  - Center: ({cluster['center'][0]:.0f}, {cluster['center'][1]:.0f})")
+    print()
+
+print("="*50)
+print(f"TOTAL CARAVANS: {len(caravans)}")
+print("="*50)
 """
 
 # =============================================================================
