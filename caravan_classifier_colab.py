@@ -16,8 +16,6 @@ from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms
 from PIL import Image
 import os
-import zipfile
-from google.colab import files
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.metrics import confusion_matrix, classification_report
@@ -29,28 +27,34 @@ print(f"Using device: {device}")
 """
 
 # =============================================================================
-# CELL 2: Upload and Extract Patches
+# CELL 2: Load Patches from Google Drive
 # =============================================================================
 """
-print("Upload your patches.zip file")
-print("Structure should be: patches/caravan/*.png and patches/not_caravan/*.png")
-uploaded = files.upload()
+from google.colab import drive
 
-zip_name = list(uploaded.keys())[0]
-with zipfile.ZipFile(zip_name, 'r') as zip_ref:
-    zip_ref.extractall('.')
+# Mount Google Drive
+drive.mount('/content/drive')
 
-# Find the patches directory
-import glob
-caravan_patches = glob.glob('**/caravan/*.png', recursive=True)
-not_caravan_patches = glob.glob('**/not_caravan/*.png', recursive=True)
+# Set path to your patches folder in Google Drive
+# Adjust this path to match where you put your patches folder
+DATA_DIR = "/content/drive/MyDrive/patches"  # <-- CHANGE THIS to your folder path
 
-print(f"Found {len(caravan_patches)} caravan patches")
-print(f"Found {len(not_caravan_patches)} non-caravan patches")
+# Verify the folder exists and has the right structure
+caravan_dir = os.path.join(DATA_DIR, 'caravan')
+not_caravan_dir = os.path.join(DATA_DIR, 'not_caravan')
 
-# Determine data directory
-DATA_DIR = os.path.dirname(os.path.dirname(caravan_patches[0]))
-print(f"Data directory: {DATA_DIR}")
+if not os.path.exists(caravan_dir):
+    print(f"ERROR: {caravan_dir} not found!")
+    print("Make sure your Google Drive has this structure:")
+    print("  MyDrive/patches/caravan/*.png")
+    print("  MyDrive/patches/not_caravan/*.png")
+else:
+    caravan_count = len([f for f in os.listdir(caravan_dir) if f.endswith('.png')])
+    not_caravan_count = len([f for f in os.listdir(not_caravan_dir) if f.endswith('.png')])
+
+    print(f"Found {caravan_count} caravan patches")
+    print(f"Found {not_caravan_count} non-caravan patches")
+    print(f"Total: {caravan_count + not_caravan_count} patches")
 """
 
 # =============================================================================
