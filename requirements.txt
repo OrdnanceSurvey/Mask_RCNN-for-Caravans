@@ -10,3 +10,4 @@ opencv-python
 h5py
 imgaug
 IPython[all]
+markdown>=3.8.1 # not directly required, pinned by Snyk to avoid a vulnerability
